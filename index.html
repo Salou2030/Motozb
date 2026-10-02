@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#0b2a5b">
+<title>Lector de matrículas</title>
+<style>
+  :root {
+    --ink: #10161f;
+    --paper: #f6f7f9;
+    --card: #ffffff;
+    --line: #d9dee6;
+    --eu: #0b3d91;
+    --green: #1a9e4b;
+    --amber: #f2b705;
+    --muted: #5c6675;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; background: var(--paper); color: var(--ink);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  .app { max-width: 640px; margin: 0 auto; padding: 10px 10px 40px; }
+
+  .viewer { position: relative; background: #000; border-radius: 10px; overflow: hidden; }
+  video { width: 100%; display: block; aspect-ratio: 4 / 3; object-fit: cover; background: #000; }
+  /* Zona de lectura: coincide con el recorte que se analiza */
+  .roi { position: absolute; left: 10%; width: 80%; top: 37.5%; height: 25%;
+    border: 3px solid var(--amber); border-radius: 6px; pointer-events: none;
+    box-shadow: 0 0 0 9999px rgba(0,0,0,.35); }
+  .roi.hit { border-color: var(--green); }
+  .status { position: absolute; left: 8px; bottom: 8px; right: 8px; display: flex;
+    justify-content: space-between; gap: 8px; font-size: .8rem; color: #fff; }
+  .status span { background: rgba(0,0,0,.6); padding: 3px 8px; border-radius: 4px; }
+
+  .controls { display: flex; gap: 8px; margin: 10px 0; }
+  .controls button { flex: 1; min-height: 48px; border-radius: 8px; border: 1px solid var(--line);
+    background: var(--card); font-size: .95rem; font-weight: 600; color: var(--ink); }
+  .controls select { flex: 1; min-height: 48px; border-radius: 8px; border: 1px solid var(--line);
+    background: var(--card); font-size: .95rem; font-weight: 600; color: var(--ink); padding: 0 8px; }
+  .controls label { flex: 1; display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: .95rem; }
+  .controls input[type=range] { flex: 1; min-height: 48px; }
+  .controls button.primary { background: var(--eu); border-color: var(--eu); color: #fff; }
+  .controls button.stop { background: #b42318; border-color: #b42318; color: #fff; }
+
+  .list-head { display: flex; justify-content: space-between; align-items: baseline; margin: 16px 2px 6px; }
+  .list-head h2 { margin: 0; font-size: 1.05rem; }
+  .list-head small { color: var(--muted); }
+  .link { background: none; border: 0; color: var(--eu); font-size: .9rem; padding: 8px 4px; }
+
+  ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+  li { background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+    display: flex; align-items: center; gap: 10px; padding: 8px 8px 8px 10px; }
+  li.done { border-color: var(--green); }
+
+  /* Matrícula con la banda azul europea */
+  .plate { display: inline-flex; align-items: stretch; border: 2px solid var(--ink);
+    border-radius: 6px; overflow: hidden; background: #fff; }
+  .plate i { background: var(--eu); color: #fff; font-style: normal; font-size: .6rem;
+    font-weight: 700; display: flex; align-items: center; padding: 0 5px; }
+  .plate b { font-size: 1.35rem; letter-spacing: .08em; padding: 4px 10px;
+    font-family: "Roboto Mono", ui-monospace, Menlo, Consolas, monospace; font-weight: 700; }
+  .meta { flex: 1; min-width: 0; font-size: .75rem; color: var(--muted); }
+
+  .actions { display: flex; gap: 6px; margin-left: auto; }
+  .actions button { min-height: 48px; border-radius: 8px; border: 0; font-size: 1rem; font-weight: 700; }
+  .btn-copy { background: var(--eu); color: #fff; padding: 0 16px; }
+  .btn-mark { width: 48px; background: #e4e8ee; color: #8b94a3; }
+  li.done .btn-mark { background: var(--green); color: #fff; }
+
+  .empty { color: var(--muted); text-align: center; padding: 24px 8px; border: 1px dashed var(--line);
+    border-radius: 10px; background: var(--card); }
+  .toast { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); background: var(--ink);
+    color: #fff; padding: 8px 14px; border-radius: 8px; font-size: .9rem; opacity: 0;
+    transition: opacity .2s; pointer-events: none; }
+  .toast.show { opacity: 1; }
+  @media (prefers-reduced-motion: reduce) { .toast { transition: none; } }
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="viewer">
+    <video id="video" autoplay playsinline muted></video>
+    <div class="roi" id="roi"></div>
+    <div class="status"><span id="state">Parado</span><span id="last">—</span></div>
+  </div>
+  <canvas id="canvas" hidden></canvas>
+
+  <div class="controls">
+    <button id="toggle" class="primary">Iniciar lectura</button>
+    <button id="torch" hidden>Linterna</button>
+  </div>
+  <div class="controls">
+    <select id="mode" aria-label="Zona de lectura">
+      <option value="full">Zona: toda la imagen</option>
+      <option value="wide">Zona: franja central</option>
+      <option value="box">Zona: recuadro</option>
+    </select>
+  </div>
+  <div class="controls" id="zoomRow" hidden>
+    <label>Zoom <input type="range" id="zoom"></label>
+  </div>
+
+  <div class="list-head">
+    <h2>Matrículas leídas <small id="count"></small></h2>
+    <button class="link" id="clear">Vaciar lista</button>
+  </div>
+  <ul id="list"></ul>
+</div>
+<div class="toast" id="toast"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+<script>
+/* ---------- Configuración ---------- */
+const CONFIG = {
+  intervalMs: 300,        // pausa entre lecturas (la lectura en sí tarda más)
+  confirmReads: 2,        // lecturas iguales necesarias para confirmar
+  confirmWindowMs: 5000,  // ventana de tiempo para esas lecturas
+  // Zonas de lectura (fracciones de la imagen visible). "box" coincide con el recuadro .roi
+  modes: {
+    full: { x: 0,    y: 0,     w: 1,    h: 1,    outWidth: 1600, psm: "11" }, // texto disperso
+    wide: { x: 0,    y: 0.20,  w: 1,    h: 0.60, outWidth: 1600, psm: "11" },
+    box:  { x: 0.10, y: 0.375, w: 0.80, h: 0.25, outWidth: 640,  psm: "7"  }  // una sola línea
+  }
+};
+let mode = "full", appliedPsm = null;
+const VALID_LETTERS = "BCDFGHJKLMNPRSTVWXYZ"; // matrícula española: sin vocales, Ñ ni Q
+const PLATE_RE = new RegExp("^\\d{4}[" + VALID_LETTERS + "]{3}$");
+const TO_DIGIT  = { O:"0", Q:"0", D:"0", I:"1", L:"1", Z:"2", S:"5", G:"6", T:"7", B:"8" };
+const TO_LETTER = { "0":"D", "1":"L", "2":"Z", "5":"S", "6":"G", "7":"T", "8":"B" };
+
+/* ---------- Elementos ---------- */
+const $ = id => document.getElementById(id);
+const video = $("video"), canvas = $("canvas"), ctx = canvas.getContext("2d", { willReadFrequently: true });
+const listEl = $("list"), roiEl = $("roi");
+
+let worker = null, running = false, stream = null, wakeLock = null, torchOn = false;
+let plates = [];             // [{plate, time, done}]
+const recent = new Map();    // plate -> [timestamps]
+
+/* ---------- Persistencia (opcional) ---------- */
+try { plates = JSON.parse(localStorage.getItem("anpr_plates") || "[]"); } catch (e) { plates = []; }
+const save = () => { try { localStorage.setItem("anpr_plates", JSON.stringify(plates)); } catch (e) {} };
+
+/* ---------- Interfaz ---------- */
+function toast(msg) {
+  const t = $("toast"); t.textContent = msg; t.classList.add("show");
+  clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.remove("show"), 1400);
+}
+function fmtTime(ts) { return new Date(ts).toLocaleTimeString("es-ES", { hour: "2-digit", minute: "2-digit", second: "2-digit" }); }
+
+function render() {
+  $("count").textContent = plates.length ? "(" + plates.length + ")" : "";
+  if (!plates.length) {
+    listEl.innerHTML = '<div class="empty">Aún no hay lecturas. Pulsa «Iniciar lectura» y apunta hacia los vehículos.</div>';
+    return;
+  }
+  listEl.innerHTML = "";
+  plates.forEach(p => {
+    const li = document.createElement("li");
+    if (p.done) li.classList.add("done");
+    li.innerHTML =
+      '<span class="plate"><i>E</i><b>' + p.plate + '</b></span>' +
+      '<span class="meta">' + fmtTime(p.time) + '</span>' +
+      '<span class="actions">' +
+        '<button class="btn-copy" aria-label="Copiar ' + p.plate + '">Copiar</button>' +
+        '<button class="btn-mark" aria-label="Marcar ' + p.plate + ' como copiada">✓</button>' +
+      '</span>';
+    li.querySelector(".btn-copy").onclick = () => copyPlate(p);
+    li.querySelector(".btn-mark").onclick = () => { p.done = !p.done; save(); render(); };
+    listEl.appendChild(li);
+  });
+}
+
+async function copyPlate(p) {
+  let ok = false;
+  try { await navigator.clipboard.writeText(p.plate); ok = true; }
+  catch (e) {
+    // Alternativa para contextos sin permiso de portapapeles
+    const ta = document.createElement("textarea");
+    ta.value = p.plate; ta.style.position = "fixed"; ta.style.opacity = "0";
+    document.body.appendChild(ta); ta.select();
+    try { ok = document.execCommand("copy"); } catch (e2) {}
+    ta.remove();
+  }
+  if (ok) { p.done = true; save(); render(); toast("Copiada " + p.plate); }
+  else toast("No se pudo copiar");
+}
+
+/* ---------- Lectura ---------- */
+function extractPlates(raw) {
+  const s = raw.toUpperCase().replace(/[^A-Z0-9]/g, "");
+  const found = [];
+  for (let i = 0; i + 7 <= s.length; i++) {
+    const w = s.slice(i, i + 7);
+    const digits = w.slice(0, 4).split("").map(c => /\d/.test(c) ? c : (TO_DIGIT[c] || "?")).join("");
+    const letters = w.slice(4).split("").map(c => /[A-Z]/.test(c) ? c : (TO_LETTER[c] || "?")).join("");
+    const cand = digits + letters;
+    if (PLATE_RE.test(cand)) found.push(cand);
+  }
+  return found;
+}
+
+function grabRoi() {
+  const vw = video.videoWidth, vh = video.videoHeight;
+  const r = CONFIG.modes[mode];
+  // El vídeo se muestra con object-fit: cover en 4:3; calculamos la parte visible
+  const boxAspect = 4 / 3, vidAspect = vw / vh;
+  let visW = vw, visH = vh, offX = 0, offY = 0;
+  if (vidAspect > boxAspect) { visW = vh * boxAspect; offX = (vw - visW) / 2; }
+  else { visH = vw / boxAspect; offY = (vh - visH) / 2; }
+  const sx = offX + visW * r.x, sy = offY + visH * r.y, sw = visW * r.w, sh = visH * r.h;
+  const outW = Math.min(r.outWidth, Math.round(sw)); // no ampliar más de la resolución real en zonas grandes
+  canvas.width = r.outWidth === 640 ? 640 : outW;
+  canvas.height = Math.round(canvas.width * sh / sw);
+  ctx.filter = "grayscale(1) contrast(1.6)";
+  ctx.drawImage(video, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
+  ctx.filter = "none";
+}
+
+function registerRead(plate) {
+  const now = Date.now();
+  const arr = (recent.get(plate) || []).filter(t => now - t < CONFIG.confirmWindowMs);
+  arr.push(now); recent.set(plate, arr);
+  $("last").textContent = plate + " (" + arr.length + "/" + CONFIG.confirmReads + ")";
+  if (arr.length >= CONFIG.confirmReads && !plates.some(p => p.plate === plate)) {
+    plates.unshift({ plate, time: now, done: false });
+    save(); render();
+    if (navigator.vibrate) navigator.vibrate(120);
+    roiEl.classList.add("hit"); setTimeout(() => roiEl.classList.remove("hit"), 600);
+  }
+}
+
+async function loop() {
+  while (running) {
+    if (video.readyState >= 2 && video.videoWidth) {
+      try {
+        const psm = CONFIG.modes[mode].psm;
+        if (psm !== appliedPsm) { await worker.setParameters({ tessedit_pageseg_mode: psm }); appliedPsm = psm; }
+        grabRoi();
+        const { data } = await worker.recognize(canvas);
+        const found = extractPlates(data.text || "");
+        [...new Set(found)].forEach(registerRead);
+        if (!found.length) $("last").textContent = "—";
+      } catch (e) { console.error(e); }
+    }
+    await new Promise(r => setTimeout(r, CONFIG.intervalMs));
+  }
+}
+
+/* ---------- Cámara, linterna y pantalla activa ---------- */
+async function startCamera() {
+  stream = await navigator.mediaDevices.getUserMedia({
+    video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+    audio: false
+  });
+  video.srcObject = stream;
+  await video.play();
+  const track = stream.getVideoTracks()[0];
+  const caps = track.getCapabilities ? track.getCapabilities() : {};
+  if (caps.torch) $("torch").hidden = false;
+  if (caps.zoom) {
+    const z = $("zoom");
+    z.min = caps.zoom.min; z.max = caps.zoom.max; z.step = caps.zoom.step || 0.1;
+    z.value = (track.getSettings().zoom) || caps.zoom.min;
+    $("zoomRow").hidden = false;
+    z.oninput = () => track.applyConstraints({ advanced: [{ zoom: parseFloat(z.value) }] }).catch(() => {});
+  }
+  try { if (caps.focusMode && caps.focusMode.includes("continuous"))
+    await track.applyConstraints({ advanced: [{ focusMode: "continuous" }] }); } catch (e) {}
+}
+async function keepAwake() {
+  try { if ("wakeLock" in navigator) wakeLock = await navigator.wakeLock.request("screen"); } catch (e) {}
+}
+document.addEventListener("visibilitychange", () => { if (running && document.visibilityState === "visible") keepAwake(); });
+
+$("torch").onclick = async () => {
+  try {
+    torchOn = !torchOn;
+    await stream.getVideoTracks()[0].applyConstraints({ advanced: [{ torch: torchOn }] });
+    $("torch").textContent = torchOn ? "Apagar linterna" : "Linterna";
+  } catch (e) { toast("Linterna no disponible"); }
+};
+
+async function start() {
+  const btn = $("toggle");
+  btn.disabled = true; $("state").textContent = "Cargando motor de lectura…";
+  try {
+    if (!window.Tesseract) throw new Error("No se pudo cargar Tesseract.js (¿sin conexión la primera vez?)");
+    if (!worker) {
+      worker = await Tesseract.createWorker("eng");
+      await worker.setParameters({
+        tessedit_char_whitelist: "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+        tessedit_pageseg_mode: "7"
+      });
+    }
+    if (!stream) await startCamera();
+    await keepAwake();
+    running = true;
+    btn.textContent = "Detener lectura"; btn.className = "stop";
+    $("state").textContent = "Leyendo…";
+    loop();
+  } catch (e) {
+    console.error(e);
+    $("state").textContent = "Error";
+    toast(e.message || "No se pudo iniciar");
+  } finally { btn.disabled = false; }
+}
+function stop() {
+  running = false;
+  $("toggle").textContent = "Iniciar lectura"; $("toggle").className = "primary";
+  $("state").textContent = "Parado";
+  if (wakeLock) { wakeLock.release().catch(() => {}); wakeLock = null; }
+}
+function applyMode() { mode = $("mode").value; roiEl.hidden = mode !== "box"; }
+$("mode").onchange = applyMode;
+applyMode();
+$("toggle").onclick = () => running ? stop() : start();
+$("clear").onclick = () => {
+  if (plates.length && confirm("¿Vaciar la lista de matrículas?")) { plates = []; recent.clear(); save(); render(); }
+};
+
+render();
+</script>
+</body>
+</html>
